@@ -76,12 +76,88 @@ bool QoiEncode(uint32_t width, uint32_t height, uint8_t channels, uint8_t colors
         b = QoiReadU8();
         if (channels == 4) a = QoiReadU8();
 
-        // TODO
-
+        // Check for run length encoding
+        if (r == pre_r && g == pre_g && b == pre_b && a == pre_a && run < 62) {
+            run++;
+        } else {
+            // Write previous run if any
+            if (run > 0) {
+                QoiWriteU8(QOI_OP_RUN_TAG | (run - 1));
+                run = 0;
+            }
+            
+            // Check if color is in history
+            int index = QoiColorHash(r, g, b, a);
+            if (history[index][0] == r && history[index][1] == g && 
+                history[index][2] == b && history[index][3] == a) {
+                QoiWriteU8(QOI_OP_INDEX_TAG | index);
+            } else {
+                // Store current color in history
+                history[index][0] = r;
+                history[index][1] = g;
+                history[index][2] = b;
+                history[index][3] = a;
+                
+                // Try to use diff encoding
+                int dr = r - pre_r;
+                int dg = g - pre_g;
+                int db = b - pre_b;
+                int da = a - pre_a;
+                
+                // Check for QOI_OP_DIFF
+                if (a == pre_a && dr >= -2 && dr <= 1 && dg >= -2 && dg <= 1 && db >= -2 && db <= 1) {
+                    QoiWriteU8(QOI_OP_DIFF_TAG | ((dr + 2) << 4) | ((dg + 2) << 2) | (db + 2));
+                } 
+                // Check for QOI_OP_LUMA
+                else if (a == pre_a && dr >= -32 && dr <= 31 && dg >= -32 && dg <= 31 && db >= -32 && db <= 31) {
+                    int dg_ = dg;
+                    int dr_dg = dr - dg_;
+                    int db_dg = db - dg_;
+                    if (dr_dg >= -8 && dr_dg <= 7 && db_dg >= -8 && db_dg <= 7) {
+                        QoiWriteU8(QOI_OP_LUMA_TAG | (dg_ + 32));
+                        QoiWriteU8((dr_dg + 8) << 4 | (db_dg + 8));
+                    } else {
+                        // Fall back to QOI_OP_RGB or QOI_OP_RGBA
+                        if (channels == 4) {
+                            QoiWriteU8(QOI_OP_RGBA_TAG);
+                            QoiWriteU8(r);
+                            QoiWriteU8(g);
+                            QoiWriteU8(b);
+                            QoiWriteU8(a);
+                        } else {
+                            QoiWriteU8(QOI_OP_RGB_TAG);
+                            QoiWriteU8(r);
+                            QoiWriteU8(g);
+                            QoiWriteU8(b);
+                        }
+                    }
+                } else {
+                    // Use QOI_OP_RGB or QOI_OP_RGBA
+                    if (channels == 4) {
+                        QoiWriteU8(QOI_OP_RGBA_TAG);
+                        QoiWriteU8(r);
+                        QoiWriteU8(g);
+                        QoiWriteU8(b);
+                        QoiWriteU8(a);
+                    } else {
+                        QoiWriteU8(QOI_OP_RGB_TAG);
+                        QoiWriteU8(r);
+                        QoiWriteU8(g);
+                        QoiWriteU8(b);
+                    }
+                }
+            }
+        }
+        
         pre_r = r;
         pre_g = g;
         pre_b = b;
         pre_a = a;
+    }
+
+    // Write final run if any
+    if (run > 0) {
+        QoiWriteU8(QOI_OP_RUN_TAG | (run - 1));
     }
 
     // qoi-padding part
@@ -122,12 +198,83 @@ bool QoiDecode(uint32_t &width, uint32_t &height, uint8_t &channels, uint8_t &co
 
     for (int i = 0; i < px_num; ++i) {
 
-        // TODO
-
+        uint8_t byte1 = QoiReadU8();
+        
+        // Check for QOI_OP_RUN
+        if ((byte1 & QOI_MASK_2) == QOI_OP_RUN_TAG) {
+            run = (byte1 & 0x3f) + 1;
+        } 
+        // Check for QOI_OP_INDEX
+        else if ((byte1 & QOI_MASK_2) == QOI_OP_INDEX_TAG) {
+            int index = byte1 & 0x3f;
+            r = history[index][0];
+            g = history[index][1];
+            b = history[index][2];
+            a = history[index][3];
+        } 
+        // Check for QOI_OP_DIFF
+        else if ((byte1 & QOI_MASK_2) == QOI_OP_DIFF_TAG) {
+            r = pre_r + (((byte1 >> 4) & 0x03) - 2);
+            g = pre_g + (((byte1 >> 2) & 0x03) - 2);
+            b = pre_b + ((byte1 & 0x03) - 2);
+            // Alpha remains unchanged
+        } 
+        // Check for QOI_OP_LUMA
+        else if ((byte1 & QOI_MASK_2) == QOI_OP_LUMA_TAG) {
+            uint8_t byte2 = QoiReadU8();
+            int dg = (byte1 & 0x3f) - 32;
+            int dr_dg = ((byte2 >> 4) & 0x0f) - 8;
+            int db_dg = (byte2 & 0x0f) - 8;
+            g = pre_g + dg;
+            r = pre_r + dg + dr_dg;
+            b = pre_b + dg + db_dg;
+            // Alpha remains unchanged
+        } 
+        // Check for QOI_OP_RGB
+        else if (byte1 == QOI_OP_RGB_TAG) {
+            r = QoiReadU8();
+            g = QoiReadU8();
+            b = QoiReadU8();
+            // Alpha remains unchanged
+        } 
+        // Check for QOI_OP_RGBA
+        else if (byte1 == QOI_OP_RGBA_TAG) {
+            r = QoiReadU8();
+            g = QoiReadU8();
+            b = QoiReadU8();
+            a = QoiReadU8();
+        } else {
+            // Invalid opcode
+            return false;
+        }
+        
+        // Store current color in history
+        int index = QoiColorHash(r, g, b, a);
+        history[index][0] = r;
+        history[index][1] = g;
+        history[index][2] = b;
+        history[index][3] = a;
+        
+        // Handle run length
+        if (run > 0) {
+            run--;
+            // Use the same color as previous pixel
+            r = pre_r;
+            g = pre_g;
+            b = pre_b;
+            a = pre_a;
+        }
+        
         QoiWriteU8(r);
         QoiWriteU8(g);
         QoiWriteU8(b);
         if (channels == 4) QoiWriteU8(a);
+        
+        // Update previous pixel values
+        pre_r = r;
+        pre_g = g;
+        pre_b = b;
+        pre_a = a;
     }
 
     bool valid = true;
